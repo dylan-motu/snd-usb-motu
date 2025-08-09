@@ -1,0 +1,12 @@
+# VS Code workspace settings
+.vscode/
+
+# Kernel build intermediate and output files
+*.o
+*.ko
+*.mod
+*.mod.c
+*.mod.o
+*.cmd
+*.symvers
+*.order
