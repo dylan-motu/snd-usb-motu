@@ -25,8 +25,8 @@ static struct usb_driver snd_usb_motu_driver;
 
 struct motu_stream
 {
-    struct snd_pcm_substream *substream;
     bool enabled;
+    struct snd_pcm_substream *substream;
     unsigned int period_frames;
     unsigned int period_count;
     unsigned int period_idx;
