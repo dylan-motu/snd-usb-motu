@@ -114,7 +114,7 @@ static bool copy_to_usb(unsigned char *dst, unsigned int dst_offset,
     unsigned int src_end_offset;
     unsigned int src_over;
 
-    if (!stream->substream)
+    if (!stream->period_count)
         return false;
     
     src = stream->substream->runtime->dma_area;
@@ -149,7 +149,7 @@ static bool copy_from_usb(const unsigned char *src, unsigned int src_offset,
     unsigned int dst_end_offset;
     unsigned int dst_over;
 
-    if (!stream->substream)
+    if (!stream->period_count)
         return false;
 
     dst = stream->substream->runtime->dma_area;
@@ -383,33 +383,21 @@ out_free:
     return -ENOMEM;
 }
 
-static void queue_start_streaming(struct snd_pcm_substream *subs,
-    struct motu_stream* stream)
+static void queue_start_streaming(struct snd_pcm_substream *subs)
 {
     struct motu_usb_data *priv = subs->private_data;
 
-    spin_lock(&priv->lock);
-
-    stream->substream = subs;
     cancel_delayed_work(&priv->stop_streams_work);
     queue_work(priv->start_stop_wq, &priv->start_streams_work);
-
-    spin_unlock(&priv->lock);
 }
 
-static void queue_stop_streaming(struct snd_pcm_substream *subs,
-    struct motu_stream* stream)
+static void queue_stop_streaming(struct snd_pcm_substream *subs)
 {
     struct motu_usb_data *priv = subs->private_data;
 
-    spin_lock(&priv->lock);
-
-    stream->substream = NULL;
     cancel_work(&priv->start_streams_work);
     queue_delayed_work(priv->start_stop_wq, &priv->stop_streams_work,
         msecs_to_jiffies(2000));
-    
-    spin_unlock(&priv->lock);
 }
 
 static int capture_pcm_open(struct snd_pcm_substream *subs)
@@ -420,6 +408,11 @@ static int capture_pcm_open(struct snd_pcm_substream *subs)
 
     subs->runtime->hw = snd_motu_hw;
 
+    spin_lock(&priv->lock);
+    priv->rec_stream.substream = subs;
+    priv->rec_stream.period_count = 0;
+    spin_unlock(&priv->lock);
+
     return 0;
 }
 
@@ -429,7 +422,12 @@ static int capture_pcm_close(struct snd_pcm_substream *subs)
 
     dev_info(&priv->usb->dev, "capture_pcm_close");
 
-    queue_stop_streaming(subs, &priv->rec_stream);
+    spin_lock(&priv->lock);
+    priv->rec_stream.substream = NULL;
+    priv->rec_stream.period_count = 0;
+    spin_unlock(&priv->lock);
+
+    queue_stop_streaming(subs);
 
     return 0;
 }
@@ -474,11 +472,11 @@ static int capture_pcm_trigger(struct snd_pcm_substream *subs, int cmd)
     switch (cmd) {
     case SNDRV_PCM_TRIGGER_START:
         dev_info(&priv->usb->dev, "capture_pcm_trigger start");
-        queue_start_streaming(subs, &priv->rec_stream);
+        queue_start_streaming(subs);
         break;
     case SNDRV_PCM_TRIGGER_STOP:
         dev_info(&priv->usb->dev, "capture_pcm_trigger stop");
-        queue_stop_streaming(subs, &priv->rec_stream);
+        queue_stop_streaming(subs);
         break;
     default:
         return -EINVAL;
@@ -511,6 +509,11 @@ static int playback_pcm_open(struct snd_pcm_substream *subs)
 
     subs->runtime->hw = snd_motu_hw;
 
+    spin_lock(&priv->lock);
+    priv->pb_stream.substream = subs;
+    priv->pb_stream.period_count = 0;
+    spin_unlock(&priv->lock);
+
     return 0;
 }
 
@@ -520,7 +523,12 @@ static int playback_pcm_close(struct snd_pcm_substream *subs)
 
     dev_info(&priv->usb->dev, "playback_pcm_close");
 
-    queue_stop_streaming(subs, &priv->pb_stream);
+    spin_lock(&priv->lock);
+    priv->pb_stream.substream = NULL;
+    priv->pb_stream.period_count = 0;
+    spin_unlock(&priv->lock);
+
+    queue_stop_streaming(subs);
 
     return 0;
 }
@@ -565,11 +573,11 @@ static int playback_pcm_trigger(struct snd_pcm_substream *subs, int cmd)
     switch (cmd) {
     case SNDRV_PCM_TRIGGER_START:
         dev_info(&priv->usb->dev, "playback_pcm_trigger start");
-        queue_start_streaming(subs, &priv->pb_stream);
+        queue_start_streaming(subs);
         break;
     case SNDRV_PCM_TRIGGER_STOP:
         dev_info(&priv->usb->dev, "playback_pcm_trigger stop");
-        queue_stop_streaming(subs, &priv->pb_stream);
+        queue_stop_streaming(subs);
         break;
     default:
         return -EINVAL;
