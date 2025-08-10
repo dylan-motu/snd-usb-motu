@@ -26,6 +26,7 @@ static struct usb_driver snd_usb_motu_driver;
 struct motu_stream
 {
     struct snd_pcm_substream *substream;
+    bool enabled;
     unsigned int period_frames;
     unsigned int period_count;
     unsigned int period_idx;
@@ -409,9 +410,12 @@ static void queue_start_streaming(struct snd_pcm_substream *subs)
     queue_work(priv->start_stop_wq, &priv->start_streams_work);
 }
 
-static void queue_stop_streaming(struct snd_pcm_substream *subs)
+static void maybe_queue_stop_streaming(struct snd_pcm_substream *subs)
 {
     struct motu_usb_data *priv = subs->private_data;
+
+    if (priv->rec_stream.enabled || priv->pb_stream.enabled)
+        return;
 
     cancel_work(&priv->start_streams_work);
     queue_delayed_work(priv->start_stop_wq, &priv->stop_streams_work,
@@ -445,7 +449,8 @@ static int capture_pcm_close(struct snd_pcm_substream *subs)
     priv->rec_stream.period_count = 0;
     spin_unlock(&priv->lock);
 
-    queue_stop_streaming(subs);
+    priv->rec_stream.enabled = false;
+    maybe_queue_stop_streaming(subs);
 
     return 0;
 }
@@ -495,11 +500,13 @@ static int capture_pcm_trigger(struct snd_pcm_substream *subs, int cmd)
     switch (cmd) {
     case SNDRV_PCM_TRIGGER_START:
         dev_info(&priv->usb->dev, "capture_pcm_trigger start");
+        priv->rec_stream.enabled = true;
         queue_start_streaming(subs);
         break;
     case SNDRV_PCM_TRIGGER_STOP:
         dev_info(&priv->usb->dev, "capture_pcm_trigger stop");
-        queue_stop_streaming(subs);
+        priv->rec_stream.enabled = false;
+        maybe_queue_stop_streaming(subs);
         break;
     default:
         return -EINVAL;
@@ -551,7 +558,8 @@ static int playback_pcm_close(struct snd_pcm_substream *subs)
     priv->pb_stream.period_count = 0;
     spin_unlock(&priv->lock);
 
-    queue_stop_streaming(subs);
+    priv->pb_stream.enabled = false;
+    maybe_queue_stop_streaming(subs);
 
     return 0;
 }
@@ -601,11 +609,13 @@ static int playback_pcm_trigger(struct snd_pcm_substream *subs, int cmd)
     switch (cmd) {
     case SNDRV_PCM_TRIGGER_START:
         dev_info(&priv->usb->dev, "playback_pcm_trigger start");
+        priv->pb_stream.enabled = true;
         queue_start_streaming(subs);
         break;
     case SNDRV_PCM_TRIGGER_STOP:
         dev_info(&priv->usb->dev, "playback_pcm_trigger stop");
-        queue_stop_streaming(subs);
+        priv->pb_stream.enabled = false;
+        maybe_queue_stop_streaming(subs);
         break;
     default:
         return -EINVAL;
