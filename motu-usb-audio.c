@@ -30,6 +30,7 @@ struct motu_stream
     unsigned int period_count;
     unsigned int period_idx;
     unsigned int frame_pos;
+    unsigned int buffer_pos;
     struct urb *start_urb;
     struct urb *urbs[NUM_URBS];
 };
@@ -67,10 +68,21 @@ static struct snd_pcm_hardware snd_motu_hw = {
     .periods_max =      16,
 };
 
+static void reset_substream_position(struct motu_stream *stream)
+{
+    stream->period_idx = 0;
+    stream->frame_pos = 0;
+    stream->buffer_pos = 0;
+}
+
 static unsigned int substream_position(const struct motu_stream *stream)
 {
-    return (stream->frame_pos * BYTES_PER_FRAME) +
-        ((stream->period_idx * stream->period_frames) * BYTES_PER_FRAME);
+    return (stream->period_idx * stream->period_frames) + stream->frame_pos;
+}
+
+static unsigned int substream_position_bytes(const struct motu_stream *stream)
+{
+    return substream_position(stream) * BYTES_PER_FRAME;
 }
 
 /**
@@ -119,7 +131,7 @@ static bool copy_to_usb(unsigned char *dst, unsigned int dst_offset,
     
     src = stream->substream->runtime->dma_area;
     src_size = stream->substream->runtime->dma_bytes;
-    src_offset = substream_position(stream);
+    src_offset = substream_position_bytes(stream);
     src_end_offset = src_offset + length;
     src_over = (src_end_offset > src_size) ? (src_end_offset - src_size) : 0;
 
@@ -154,7 +166,7 @@ static bool copy_from_usb(const unsigned char *src, unsigned int src_offset,
 
     dst = stream->substream->runtime->dma_area;
     dst_size = stream->substream->runtime->dma_bytes;
-    dst_offset = substream_position(stream);
+    dst_offset = substream_position_bytes(stream);
     dst_end_offset = dst_offset + length;
     dst_over = (dst_end_offset > dst_size) ? (dst_end_offset - dst_size) : 0;
 
@@ -178,7 +190,7 @@ static void capture_complete_urb(struct urb *urb)
     bool is_start = urb == priv->rec_stream.start_urb;
     bool rec_period_elapsed = false;
     bool pb_period_elapsed = false;
-    bool locked;
+    bool locked = false;
 
     if (!atomic_read(&priv->streams_started))
         return;
@@ -192,7 +204,8 @@ static void capture_complete_urb(struct urb *urb)
         priv->pb_urb_idx = (priv->pb_urb_idx + 1) % NUM_URBS;
     }
     
-    locked = spin_trylock(&priv->lock);
+    if (!is_start)
+        locked = spin_trylock(&priv->lock);
 
     for (int i = 0; i < urb->number_of_packets; ++i) {
         /* Nominal Packet Size */
@@ -205,13 +218,18 @@ static void capture_complete_urb(struct urb *urb)
         
         pb_urb->iso_frame_desc[i].length = length;
 
-        if (locked && !is_start)
+        if (locked)
         {
             rec_period_elapsed |= copy_from_usb(urb->transfer_buffer,
                 urb->iso_frame_desc[i].offset, &priv->rec_stream, length);
             pb_period_elapsed |= copy_to_usb(pb_urb->transfer_buffer,
                 pb_urb->iso_frame_desc[i].offset, &priv->pb_stream, length);
         }
+    }
+
+    if (locked) {
+        priv->rec_stream.buffer_pos = substream_position(&priv->rec_stream);
+        priv->pb_stream.buffer_pos = substream_position(&priv->pb_stream);
     }
     
     if (rec_period_elapsed)
@@ -448,10 +466,11 @@ static int capture_pcm_hw_params(struct snd_pcm_substream *subs,
     dev_info(&priv->usb->dev, "Capture Period Size: %u",
         params_period_size(hw_params));
     
-    priv->rec_stream.period_idx = 0;
-    priv->rec_stream.frame_pos = 0;
+    spin_lock(&priv->lock);
+    reset_substream_position(&priv->rec_stream);
     priv->rec_stream.period_count = params_periods(hw_params);
     priv->rec_stream.period_frames = params_period_size(hw_params);
+    spin_unlock(&priv->lock);
     
     return 0;
 }
@@ -461,6 +480,10 @@ static int capture_pcm_prepare(struct snd_pcm_substream *subs)
     struct motu_usb_data *priv = subs->private_data;
 
     dev_info(&priv->usb->dev, "capture_pcm_prepare");
+
+    spin_lock(&priv->lock);
+    reset_substream_position(&priv->rec_stream);
+    spin_unlock(&priv->lock);
 
     return 0;
 }
@@ -489,7 +512,7 @@ static snd_pcm_uframes_t capture_pcm_pointer(struct snd_pcm_substream *subs)
 {
     struct motu_usb_data *priv = subs->private_data;
 
-    return priv->rec_stream.period_idx * priv->rec_stream.period_frames;
+    return priv->rec_stream.buffer_pos;
 }
 
 static const struct snd_pcm_ops capture_pcm_ops = {
@@ -549,10 +572,11 @@ static int playback_pcm_hw_params(struct snd_pcm_substream *subs,
     dev_info(&priv->usb->dev, "Playback Period Size: %u",
         params_period_size(hw_params));
     
-    priv->pb_stream.period_idx = 0;
-    priv->pb_stream.frame_pos = 0;
+    spin_lock(&priv->lock);
+    reset_substream_position(&priv->pb_stream);
     priv->pb_stream.period_count = params_periods(hw_params);
     priv->pb_stream.period_frames = params_period_size(hw_params);
+    spin_unlock(&priv->lock);
     
     return 0;
 }
@@ -562,6 +586,10 @@ static int playback_pcm_prepare(struct snd_pcm_substream *subs)
     struct motu_usb_data *priv = subs->private_data;
 
     dev_info(&priv->usb->dev, "playback_pcm_prepare");
+
+    spin_lock(&priv->lock);
+    reset_substream_position(&priv->pb_stream);
+    spin_unlock(&priv->lock);
 
     return 0;
 }
@@ -591,7 +619,7 @@ static snd_pcm_uframes_t playback_pcm_pointer(struct snd_pcm_substream *subs)
     struct motu_usb_data *priv = subs->private_data;
     struct motu_stream *stream = &priv->pb_stream;
 
-    return stream->period_idx * stream->period_frames;
+    return stream->buffer_pos;
 }
 
 static const struct snd_pcm_ops playback_pcm_ops = {
