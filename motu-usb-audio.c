@@ -20,8 +20,17 @@ MODULE_LICENSE("GPL v2");
 #define NUM_CH              24
 #define BYTES_PER_SAMPLE    3
 #define BYTES_PER_FRAME     (NUM_CH * BYTES_PER_SAMPLE)
+#define PERF_INTERVAL       5000
 
 static struct usb_driver snd_usb_motu_driver;
+
+struct motu_perf
+{
+    u64 last;
+    u64 max;
+    u64 min;
+    u32 num;
+};
 
 struct motu_stream
 {
@@ -47,6 +56,7 @@ struct motu_usb_data
     struct delayed_work stop_streams_work;
     struct motu_stream rec_stream;
     struct motu_stream pb_stream;
+    struct motu_perf perf;
     unsigned int pb_urb_idx;
 };
 
@@ -68,6 +78,68 @@ static struct snd_pcm_hardware snd_motu_hw = {
     .periods_min =      2,
     .periods_max =      16,
 };
+
+/* x86 only */
+static inline u64 tsc_to_ns(void)
+{
+    u64 cycles;
+    u32 hi, lo;
+
+    asm volatile("rdtsc" : "=a"(lo), "=d"(hi));
+    cycles = ((u64)hi << 32) | lo;
+
+    return div64_u64(cycles * 1000000ULL, tsc_khz);
+}
+
+static inline void reset_perf(struct motu_usb_data *priv)
+{
+    struct motu_perf *perf = &priv->perf;
+
+    perf->max = 0;
+    perf->min = 0xFFFFFFFFFFFFFFFFULL;
+    perf->num = 0;
+}
+
+static inline void init_perf(struct motu_usb_data *priv)
+{
+    struct motu_perf *perf = &priv->perf;
+
+    perf->last = tsc_to_ns();
+    reset_perf(priv);
+}
+
+static inline void log_perf(struct motu_usb_data *priv)
+{
+    struct motu_perf *perf = &priv->perf;
+
+    dev_info(&priv->usb->dev, "Interval (%llu, %llu)", perf->min, perf->max);
+    
+    perf->last = tsc_to_ns();
+    perf->max = 0;
+    perf->min = 0xFFFFFFFFFFFFFFFFULL;
+    perf->num = 0;
+}
+
+static inline void update_perf(struct motu_usb_data *priv)
+{
+    struct motu_perf *perf = &priv->perf;
+
+    u64 now = tsc_to_ns();
+    u64 delta = now - perf->last;
+
+    perf->last = now;
+
+    if (delta > perf->max)
+        perf->max = delta;
+    
+    if (delta < perf->min)
+        perf->min = delta;
+    
+    if (++perf->num >= PERF_INTERVAL) {
+        log_perf(priv);
+        reset_perf(priv);
+    }
+}
 
 static void reset_substream_position(struct motu_stream *stream)
 {
@@ -197,10 +269,12 @@ static void capture_complete_urb(struct urb *urb)
         return;
 
     if (is_start) {
+        init_perf(priv);
         pb_urb = priv->pb_stream.start_urb;
         priv->pb_urb_idx = 0;
     }
     else {
+        update_perf(priv);
         pb_urb = priv->pb_stream.urbs[priv->pb_urb_idx];
         priv->pb_urb_idx = (priv->pb_urb_idx + 1) % NUM_URBS;
     }
@@ -499,7 +573,9 @@ static int capture_pcm_trigger(struct snd_pcm_substream *subs, int cmd)
 
     switch (cmd) {
     case SNDRV_PCM_TRIGGER_START:
-        dev_info(&priv->usb->dev, "capture_pcm_trigger start");
+        dev_info(&priv->usb->dev,
+            "capture_pcm_trigger start (stop_threshold:%lu)",
+            subs->runtime->stop_threshold);
         priv->rec_stream.enabled = true;
         queue_start_streaming(subs);
         break;
@@ -608,7 +684,9 @@ static int playback_pcm_trigger(struct snd_pcm_substream *subs, int cmd)
 
     switch (cmd) {
     case SNDRV_PCM_TRIGGER_START:
-        dev_info(&priv->usb->dev, "playback_pcm_trigger start");
+        dev_info(&priv->usb->dev,
+            "playback_pcm_trigger start (stop_threshold:%lu)",
+            subs->runtime->stop_threshold);
         priv->pb_stream.enabled = true;
         queue_start_streaming(subs);
         break;
