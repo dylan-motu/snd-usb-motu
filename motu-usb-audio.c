@@ -2,6 +2,7 @@
 /*
  * MOTU Pro Audio USB Driver
  */
+#include <linux/hrtimer.h>
 #include <linux/module.h>
 #include <linux/spinlock.h>
 #include <linux/usb.h>
@@ -14,7 +15,7 @@ MODULE_DESCRIPTION("MOTU Pro Audio USB Driver");
 MODULE_AUTHOR("Dylan Robinson <dylan_robinson@motu.com>");
 MODULE_LICENSE("GPL v2");
 
-#define NUM_URBS            16
+#define NUM_URBS            32
 #define UFRAMES_PER_URB     16
 #define START_URB_UFRAMES   128
 #define NUM_CH              24
@@ -26,6 +27,7 @@ static struct usb_driver snd_usb_motu_driver;
 
 struct motu_perf
 {
+    const char* name;
     u64 last;
     u64 max;
     u64 min;
@@ -56,7 +58,9 @@ struct motu_usb_data
     struct delayed_work stop_streams_work;
     struct motu_stream rec_stream;
     struct motu_stream pb_stream;
-    struct motu_perf perf;
+    struct hrtimer timer;
+    struct motu_perf perf1;
+    struct motu_perf perf2;
     unsigned int pb_urb_idx;
 };
 
@@ -91,39 +95,27 @@ static inline u64 tsc_to_ns(void)
     return div64_u64(cycles * 1000000ULL, tsc_khz);
 }
 
-static inline void reset_perf(struct motu_usb_data *priv)
+static inline void reset_perf(struct motu_perf *perf)
 {
-    struct motu_perf *perf = &priv->perf;
-
     perf->max = 0;
     perf->min = 0xFFFFFFFFFFFFFFFFULL;
     perf->num = 0;
 }
 
-static inline void init_perf(struct motu_usb_data *priv)
+static inline void init_perf(struct motu_perf *perf)
 {
-    struct motu_perf *perf = &priv->perf;
-
     perf->last = tsc_to_ns();
-    reset_perf(priv);
+    reset_perf(perf);
 }
 
-static inline void log_perf(struct motu_usb_data *priv)
+static inline void log_perf(struct motu_perf *perf, struct usb_device *usb)
 {
-    struct motu_perf *perf = &priv->perf;
-
-    dev_info(&priv->usb->dev, "Interval (%llu, %llu)", perf->min, perf->max);
-    
-    perf->last = tsc_to_ns();
-    perf->max = 0;
-    perf->min = 0xFFFFFFFFFFFFFFFFULL;
-    perf->num = 0;
+    dev_info(&usb->dev, "Interval (%llu, %llu) %s",
+        perf->min, perf->max, perf->name);
 }
 
-static inline void update_perf(struct motu_usb_data *priv)
+static inline void update_perf(struct motu_perf *perf, struct usb_device *usb)
 {
-    struct motu_perf *perf = &priv->perf;
-
     u64 now = tsc_to_ns();
     u64 delta = now - perf->last;
 
@@ -136,9 +128,20 @@ static inline void update_perf(struct motu_usb_data *priv)
         perf->min = delta;
     
     if (++perf->num >= PERF_INTERVAL) {
-        log_perf(priv);
-        reset_perf(priv);
+        log_perf(perf, usb);
+        reset_perf(perf);
     }
+}
+
+static enum hrtimer_restart timer_callback(struct hrtimer *timer)
+{
+    struct motu_usb_data *priv =
+        container_of(timer, struct motu_usb_data, timer);
+    
+    hrtimer_forward_now(timer, 2000000);
+    update_perf(&priv->perf2, priv->usb);
+
+    return HRTIMER_RESTART;
 }
 
 static void reset_substream_position(struct motu_stream *stream)
@@ -269,12 +272,14 @@ static void capture_complete_urb(struct urb *urb)
         return;
 
     if (is_start) {
-        init_perf(priv);
+        init_perf(&priv->perf1);
+        init_perf(&priv->perf2);
+        hrtimer_start(&priv->timer, 2000000, HRTIMER_MODE_REL);
         pb_urb = priv->pb_stream.start_urb;
         priv->pb_urb_idx = 0;
     }
     else {
-        update_perf(priv);
+        update_perf(&priv->perf1, priv->usb);
         pb_urb = priv->pb_stream.urbs[priv->pb_urb_idx];
         priv->pb_urb_idx = (priv->pb_urb_idx + 1) % NUM_URBS;
     }
@@ -354,6 +359,8 @@ static void stop_streaming_endpoints(struct work_struct *work)
     
     dev_info(&priv->usb->dev, "stop_streaming_endpoints");
     
+    hrtimer_cancel(&priv->timer);
+
     usb_kill_urb(priv->rec_stream.start_urb);
     usb_kill_urb(priv->pb_stream.start_urb);
 
@@ -814,6 +821,12 @@ static int motu_usb_audio_probe(struct usb_interface *intf,
         INIT_WORK(&priv->start_streams_work, start_streaming_endpoints);
         INIT_DELAYED_WORK(&priv->stop_streams_work, stop_streaming_endpoints);
 
+        hrtimer_setup(&priv->timer, timer_callback, CLOCK_MONOTONIC,
+            HRTIMER_MODE_REL);
+
+        priv->perf1.name = "Completion";
+        priv->perf2.name = "hrtimer";
+
         strcpy(card->driver, "MOTU Driver");
         strcpy(card->shortname, "MOTU Pro Audio");
         strcpy(card->longname, "MOTU Pro Audio");
@@ -844,6 +857,7 @@ static void motu_usb_audio_disconnect(struct usb_interface *intf)
     if ((ifnum == 0) && priv) {
         dev_info(&dev->dev, "Disconnect: Freeing Card");
         snd_card_disconnect_sync(priv->card);
+        hrtimer_cancel(&priv->timer);
         cancel_work_sync(&priv->start_streams_work);
         cancel_delayed_work_sync(&priv->stop_streams_work);
         atomic_set(&priv->streams_started, 0);
