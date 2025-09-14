@@ -411,12 +411,14 @@ static void handle_interval_interrupt(struct motu_usb_data *priv)
         priv->pb_adj = 0;
     }
 
-    if (rec_stream->enabled && spin_trylock(&rec_stream->lock)) {
-        copy_period_from_usb(rec_stream, period_size);
-        spin_unlock(&rec_stream->lock);
-    }
-    else {
-        sync_period_from_usb(rec_stream, period_size);
+    if (rec_stream->copy_pos != TOTAL_UFRAMES) {
+        if (rec_stream->enabled && spin_trylock(&rec_stream->lock)) {
+            copy_period_from_usb(rec_stream, period_size);
+            spin_unlock(&rec_stream->lock);
+        }
+        else {
+            sync_period_from_usb(rec_stream, period_size);
+        }
     }
 
     if (priv->pb_start_state == PB_START_RUNNING) {
