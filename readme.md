@@ -27,20 +27,15 @@ Currently **only USB 2.0 models** are supported:
 
 - **Audio streaming only**
 - Control/configuration must be done via the device’s web UI over Ethernet
-- Works only at **48 kHz** sample rate
-- **High latency** at present
-- Does not handle clock lock loss — you must ensure the device is locked at 48 kHz **before** connecting to the computer
-- Some debug logging (`sudo dmesg -w` to view)
-
-The primary purpose is to prove a streaming / URB submission scheme that avoids the channel-hopping and distortion issues seen with the generic USB Audio Class driver.
-
+- Works only at **SAMPLE_RATE** sample rate (default: 48 kHz)
+- Does not handle clock lock loss — you must ensure the device is locked at SAMPLE_RATE **before** connecting to the computer
+- Debug logging (`sudo dmesg -w` to view)
 
 ## Planned Improvements
 
-- Lower latency
-- Support for multiple sample rates
-- Handle clock lock / unlock
-
+- Changing clock rate
+- Handling clock loss
+- 64 channels
 
 ## Building and Running
 
@@ -75,7 +70,7 @@ This does not install the driver permanently — after a reboot, the system will
 In my experience, you can run this script with the device connected. If you encounter any issues, try these steps:
 1. Disconnect the device
 1. Run the script
-1. Ensure the device's clock is set to 48 kHz and is locked
+1. Ensure the device's clock is set to SAMPLE_RATE and is locked
 1. Reconnect the device
 
 ## Viewing Logs
@@ -86,8 +81,6 @@ sudo dmesg -w
 
 ## Disclaimer
 
-This is experimental software intended for development and testing only.  
-It may cause unexpected behavior, high latency, or audio glitches.  
-Use at your own risk.  
+This is experimental software. Use at your own risk.
 
 **This driver is not officially supported or endorsed by MOTU, Inc.**
