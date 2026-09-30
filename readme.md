@@ -83,4 +83,4 @@ sudo dmesg -w
 
 This is experimental software. Use at your own risk.
 
-**This driver is not officially supported or endorsed by MOTU, Inc.**
+**This driver is not officially supported by MOTU, Inc.**
