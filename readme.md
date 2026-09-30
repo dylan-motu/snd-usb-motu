@@ -20,8 +20,6 @@ Currently **only USB 2.0 models** are supported:
 - 828es
 - 8pre-es
 
-> **Note:** This driver is in **early development**. Expect limited functionality and noisy logging.
-
 
 ## Current Status
 
